@@ -3226,6 +3226,9 @@ loadSheet();
   dlg.addEventListener('click', e => { if (e.target === dlg) close(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && dlg.classList.contains('open')) close(); });
 
+  // Distance in km from a position outside Odisha to the nearest district
+  const distOut = (lat, lon) => shapes.reduce((m, s) => Math.min(m, distKm(lon, lat, s)), Infinity);
+
   // ---- Where the reader is, and where that takes them
   const fmtAcc = km => km < 1 ? 'about ' + Math.max(10, Math.round(km * 100) * 10) + ' m' : 'about ' + (km < 10 ? km.toFixed(1).replace(/\.0$/, '') : Math.round(km)) + ' km';
   const list = a => a.length < 2 ? a.join('') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
@@ -3260,9 +3263,11 @@ loadSheet();
       }, false);
     }
   }
-  // A single reading is often a rough network fix. Watch for a few seconds with GPS allowed, keep the sharpest
-  // reading, and stop as soon as one is good to within 100 m.
-  const GOOD = 100, LIMIT = 12000;
+  // Two requests run side by side: a quick network fix (or a recent one the device already holds), which
+  // usually arrives in under a second, and a GPS watch that sharpens it. The search stops as soon as the
+  // district is certain: the whole accuracy circle lies inside one district. Most readers are well inside
+  // a district, so they get an answer from the first reading; only those near a border wait for GPS.
+  const GOOD = 100, LIMIT = 7000, SURE_KM = 3;
   let watching = null, searching = false;
   function stopWatch(){ if (watching) { navigator.geolocation.clearWatch(watching.id); clearTimeout(watching.t); watching = null; } }
   function ask(manual){
@@ -3287,14 +3292,21 @@ loadSheet();
       else show('Your location could not be found', 'Check that location services are on, then select Find my district again.', '', null, false);
     };
     w.end = end;
-    w.id = navigator.geolocation.watchPosition(p => {
+    const take = p => {
+      if (ended) return;
       if (!best || p.coords.accuracy < best.coords.accuracy) best = p;
-      if (manual && !ended) $('geoMsg').textContent = 'Getting the most precise reading this device can give. Accurate to ' + fmtAcc(best.coords.accuracy / 1000) + ' so far.';
-      if (best.coords.accuracy <= GOOD) end();
-    }, err => {
+      const acc = best.coords.accuracy;
+      if (manual) $('geoMsg').textContent = 'Getting the most precise reading this device can give. Accurate to ' + fmtAcc(acc / 1000) + ' so far.';
+      if (acc <= GOOD) { end(); return; }
+      const at = locate(best.coords.latitude, best.coords.longitude, acc);
+      if (acc / 1000 <= SURE_KM && (at.name ? !at.near.length : distOut(best.coords.latitude, best.coords.longitude) > acc / 1000)) end();
+    };
+    const fail = err => {
       lastErr = err;
       if (err.code === 1) end();   // permission refused: no point waiting
-    }, { enableHighAccuracy: true, timeout: LIMIT, maximumAge: 0 });
+    };
+    navigator.geolocation.getCurrentPosition(take, fail, { enableHighAccuracy: false, timeout: LIMIT, maximumAge: 120000 });
+    w.id = navigator.geolocation.watchPosition(take, fail, { enableHighAccuracy: true, timeout: LIMIT, maximumAge: 30000 });
     w.t = setTimeout(end, LIMIT);
     watching = w;
   }
